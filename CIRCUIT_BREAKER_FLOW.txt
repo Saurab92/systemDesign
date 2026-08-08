@@ -1,0 +1,246 @@
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                    CIRCUIT BREAKER CALL FLOW DIAGRAM                         ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+═══════════════════════════════════════════════════════════════════════════════
+                    1. NORMAL USER REQUEST (Automatic)
+═══════════════════════════════════════════════════════════════════════════════
+
+    User/Client
+        │
+        │ HTTP GET http://localhost:8082/api/products
+        ↓
+    ┌─────────────────┐
+    │ProductController│
+    └────────┬────────┘
+             │ getAllProducts()
+             ↓
+    ┌─────────────────┐
+    │ ProductService  │
+    └────────┬────────┘
+             │
+             │ circuitBreaker.execute(...)  ← AUTOMATIC CALL
+             ↓
+    ╔═══════════════════════════════════════╗
+    ║      🔘 CIRCUIT BREAKER CHECK         ║
+    ║  (Happens on EVERY request)           ║
+    ╚═══════════════════════════════════════╝
+             │
+             ├─── Is State CLOSED? ────→ ✅ Allow request
+             │                              │
+             │                              ↓
+             │                          Retry Template
+             │                              │
+             │                              ↓
+             │                          RestClient
+             │                              │
+             │                              ↓
+             │                          External API
+             │                              │
+             │                              ↓
+             │                          Return Data
+             │
+             ├─── Is State OPEN? ──────→ ❌ Reject immediately
+             │                              │
+             │                              ↓
+             │                          Execute Fallback
+             │                              │
+             │                              ↓
+             │                          Return []
+             │
+             └─── Is State HALF_OPEN? ─→ 🟡 Allow LIMITED requests
+                                            │
+                                            ↓
+                                        Test external service
+
+
+═══════════════════════════════════════════════════════════════════════════════
+              2. MONITORING ENDPOINTS (Manual or Automated)
+═══════════════════════════════════════════════════════════════════════════════
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  A) DevOps Engineer / Monitoring System                                      │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+    DevOps/Monitoring Tool
+        │
+        │ HTTP GET /api/circuit-breaker/status
+        ↓
+    ┌───────────────────────────┐
+    │CircuitBreakerController   │  ← MANUAL/SCHEDULED CALL
+    │   getStatus()             │
+    └─────────────┬─────────────┘
+                  │
+                  ↓
+        Read current state & metrics
+                  │
+                  ↓
+        Return JSON response
+
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  B) Load Balancer / Kubernetes                                               │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+    Load Balancer/K8s
+        │
+        │ HTTP GET /api/circuit-breaker/health
+        │ (Every 10-30 seconds)
+        ↓
+    ┌───────────────────────────┐
+    │CircuitBreakerController   │  ← AUTOMATED HEALTH CHECK
+    │   health()                │
+    └─────────────┬─────────────┘
+                  │
+                  ├──→ If State = CLOSED  → Return 200 (UP)
+                  │
+                  └──→ If State = OPEN    → Return 503 (DOWN)
+
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  C) Operations Team                                                           │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+    Ops Engineer
+        │
+        │ HTTP POST /api/circuit-breaker/reset
+        │ (After fixing underlying issue)
+        ↓
+    ┌───────────────────────────┐
+    │CircuitBreakerController   │  ← MANUAL INTERVENTION
+    │   reset()                 │
+    └─────────────┬─────────────┘
+                  │
+                  ↓
+        Force circuit to CLOSED
+                  │
+                  ↓
+        Clear all metrics
+                  │
+                  ↓
+        Return success message
+
+
+═══════════════════════════════════════════════════════════════════════════════
+                    3. AUTOMATIC STATE TRANSITIONS
+═══════════════════════════════════════════════════════════════════════════════
+
+    No external call needed - happens automatically inside circuit breaker!
+
+    ┌──────────┐
+    │ CLOSED   │  Normal operation
+    │ (Green)  │  
+    └────┬─────┘
+         │
+         │ Failure rate > 50%
+         │ (Automatic detection)
+         ↓
+    ┌──────────┐
+    │  OPEN    │  Fast-fail mode
+    │  (Red)   │  Rejects all requests
+    └────┬─────┘
+         │
+         │ Wait 60 seconds
+         │ (Automatic timeout)
+         ↓
+    ┌──────────┐
+    │HALF_OPEN │  Testing recovery
+    │ (Yellow) │  Limited requests
+    └────┬─────┘
+         │
+         ├──→ 2 successes  → Back to CLOSED ✅
+         │
+         └──→ 1 failure    → Back to OPEN ❌
+
+
+═══════════════════════════════════════════════════════════════════════════════
+                    4. COMPLETE REQUEST TIMELINE
+═══════════════════════════════════════════════════════════════════════════════
+
+Time      Event                                    Who Calls It         Automatic?
+────────────────────────────────────────────────────────────────────────────────
+09:00 AM  GET /api/products                       User                 N/A
+          ↓ Circuit breaker check                 ProductService       ✅ Auto
+          ↓ State: CLOSED → Allow                 Circuit Breaker      ✅ Auto
+          ↓ External API call succeeds            RestClient           ✅ Auto
+          ↓ Record success in metrics             Circuit Breaker      ✅ Auto
+
+09:05 AM  GET /api/circuit-breaker/status         DevOps Dashboard     ❌ Manual
+          ↓ Return state=CLOSED                   Controller           ✅ Auto
+
+09:10 AM  GET /api/products                       User                 N/A
+          ↓ Circuit breaker check                 ProductService       ✅ Auto
+          ↓ External API starts failing           -                    -
+          ↓ Record failure in metrics             Circuit Breaker      ✅ Auto
+
+09:11 AM  More failures...                        Users                N/A
+          ↓ Failure rate reaches 60%              Circuit Breaker      ✅ Auto
+          ↓ Transition to OPEN                    Circuit Breaker      ✅ Auto
+
+09:12 AM  GET /api/products                       User                 N/A
+          ↓ Circuit breaker check                 ProductService       ✅ Auto
+          ↓ State: OPEN → Reject                  Circuit Breaker      ✅ Auto
+          ↓ Execute fallback                      Circuit Breaker      ✅ Auto
+          ↓ Return empty list []                  ProductService       ✅ Auto
+
+09:12 AM  GET /api/circuit-breaker/health         Load Balancer        ✅ Auto
+          ↓ Return 503 DOWN                       Controller           ✅ Auto
+
+09:13 AM  POST /api/circuit-breaker/reset         Ops Engineer         ❌ Manual
+          ↓ Force to CLOSED                       Controller           ✅ Auto
+          ↓ Reset metrics                         Circuit Breaker      ✅ Auto
+
+
+═══════════════════════════════════════════════════════════════════════════════
+                           KEY INSIGHTS
+═══════════════════════════════════════════════════════════════════════════════
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 1. Circuit Breaker Logic: AUTOMATIC on every Product API call              │
+│    - You don't call it directly                                             │
+│    - Wraps your service method                                              │
+│    - Transparent to users                                                   │
+│                                                                              │
+│ 2. Monitoring Endpoints: MANUAL or by monitoring tools                     │
+│    - /status   → DevOps checks this when troubleshooting                   │
+│    - /health   → Load balancers call this every few seconds                │
+│    - /reset    → Ops team calls this after fixing issues                   │
+│                                                                              │
+│ 3. State Transitions: AUTOMATIC based on metrics                           │
+│    - No external trigger needed                                             │
+│    - Happens in real-time                                                   │
+│    - Self-healing behavior                                                  │
+│                                                                              │
+│ 4. YOU ONLY NEED TO:                                                        │
+│    ✅ Call your normal API: GET /api/products                              │
+│    ✅ Circuit breaker works behind the scenes                              │
+│    ✅ Check status when troubleshooting: GET /api/circuit-breaker/status  │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+
+═══════════════════════════════════════════════════════════════════════════════
+                    WHO CALLS WHAT - QUICK REFERENCE
+═══════════════════════════════════════════════════════════════════════════════
+
+┌─────────────────────┬─────────────────────┬──────────────┬───────────────────┐
+│ Endpoint/Component  │ Called By           │ Frequency    │ Purpose           │
+├─────────────────────┼─────────────────────┼──────────────┼───────────────────┤
+│ Circuit Breaker     │ ProductService      │ Every        │ Protect external  │
+│ Logic               │ (Automatic)         │ request      │ API calls         │
+├─────────────────────┼─────────────────────┼──────────────┼───────────────────┤
+│ GET /api/products   │ End Users/Apps      │ As needed    │ Get products      │
+│                     │                     │              │ (triggers CB)     │
+├─────────────────────┼─────────────────────┼──────────────┼───────────────────┤
+│ GET                 │ DevOps Engineers    │ Ad-hoc or    │ Check CB status   │
+│ /circuit-breaker/   │ Monitoring Systems  │ every 30-60s │ and metrics       │
+│ status              │                     │              │                   │
+├─────────────────────┼─────────────────────┼──────────────┼───────────────────┤
+│ GET                 │ Load Balancers      │ Every 5-30s  │ Health checks     │
+│ /circuit-breaker/   │ Kubernetes Probes   │ (automated)  │ for routing       │
+│ health              │                     │              │                   │
+├─────────────────────┼─────────────────────┼──────────────┼───────────────────┤
+│ POST                │ Operations Team     │ Rarely,      │ Manual recovery   │
+│ /circuit-breaker/   │                     │ as needed    │ intervention      │
+│ reset               │                     │              │                   │
+└─────────────────────┴─────────────────────┴──────────────┴───────────────────┘
+
